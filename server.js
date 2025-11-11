@@ -240,4 +240,6 @@ app.post("/notify/user", async (req, res) => {
 
 
 // -------------------- INICIAR SERVIDOR --------------------
-app.listen(5000, () => console.log("🚀 Servidor backend en http://localhost:5000"));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Servidor backend en puerto ${PORT}`));
+
