@@ -1,4 +1,7 @@
 // server.js
+import dotenv from "dotenv";   
+dotenv.config();               
+
 import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
@@ -10,31 +13,53 @@ import { User } from './src/models/user.js';
 import { Product } from './src/models/Product.js';
 import { Purchase } from "./src/models/Purchase.js";
 import { Cart } from "./src/models/Cart.js";
+import { Subscription } from "./src/models/Subscription.js";
 
 // -------------------- VAPID KEYS --------------------
 const publicVapidKey = "BAJsbBvLPvl-vgyjPtnENPdRrR4RMoNPd6vEuUt4nKMdek-lOirCFs3A4gG9BSEujvD58jfEz4oCy4aUfwWaIBM";
 const privateVapidKey = "kIThQQnhmekPdgek3WJOAILsG_PUNojMtnZ4i9UimV4";
 
 webpush.setVapidDetails(
-  "mailto:fer@example.com", // email válido
+  "mailto:fer@example.com",
   publicVapidKey,
   privateVapidKey
 );
 
 const app = express();
+
+// -------------------- CORS --------------------
+const allowedOrigins = [
+  "https://pwa-fe.onrender.com", // FE producción
+  "http://localhost:5173"        // FE local
+];
+
 app.use(cors({
-  origin: "https://pwa-fe.onrender.com", // URL de tu frontend
+  origin: function(origin, callback){
+    if (!origin) return callback(null, true); // permite Postman o curl
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error("No permitido por CORS"));
+    }
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"], // todos los métodos
+  allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true
 }));
+
+// Responder correctamente al preflight
+app.options("*", cors());
 
 app.use(express.json());
 
 // -------------------- MongoDB --------------------
-console.log("Mongo URI que usa el backend:", process.env.MONGO_URI);
+const mongoUri = process.env.MONGO_URI;
+console.log("Mongo URI que usa el backend:", mongoUri);
 
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect(mongoUri)
   .then(() => console.log("✅ MongoDB conectado"))
   .catch(err => console.error("❌ Error Mongo:", err));
+
 // -------------------- AUTH --------------------
 app.post("/register", async (req, res) => {
   try {
@@ -50,8 +75,7 @@ app.post("/register", async (req, res) => {
 
 app.post("/login", async (req, res) => {
   try {
-    
-    console.log("📲 LOGIN REQUEST BODY:", req.body); // <---- agrega esto
+    console.log("📲 LOGIN REQUEST BODY:", req.body);
     const { email, password } = req.body;
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ error: "Usuario no encontrado" });
@@ -60,7 +84,7 @@ app.post("/login", async (req, res) => {
     if (!isMatch) return res.status(400).json({ error: "Contraseña incorrecta" });
 
     const token = jwt.sign({ id: user._id }, "secreto123", { expiresIn: "1h" });
-    console.log("✅ LOGIN OK para usuario:", email); // <---- agrega esto
+    console.log("✅ LOGIN OK para usuario:", email);
     res.json({ message: "Login exitoso ✅", token, userId: user._id });
   } catch (err) {
     res.status(500).json({ error: "Error en el login" });
@@ -145,9 +169,21 @@ app.post("/cart/checkout", async (req, res) => {
 });
 
 // -------------------- PUSH NOTIFICATIONS --------------------
-import { Subscription } from "./src/models/Subscription.js";
+async function sendNotificationDoc(subDoc, payload) {
+  try {
+    await webpush.sendNotification(subDoc.subscription, JSON.stringify(payload));
+    return { ok: true };
+  } catch (err) {
+    console.error("sendNotification error:", err && err.statusCode, err && err.body);
+    if (err && (err.statusCode === 410 || err.statusCode === 404)) {
+      await Subscription.deleteOne({ _id: subDoc._id });
+      console.log("🧹 Suscripción removida (obsoleta):", subDoc._id.toString());
+      return { ok: false, removed: true };
+    }
+    return { ok: false, error: String(err) };
+  }
+}
 
-// Ruta para recibir y guardar suscripción (frontend debe enviar { subscription, userId?, role? })
 app.post("/subscribe", async (req, res) => {
   try {
     const { subscription, userId, role } = req.body;
@@ -156,7 +192,6 @@ app.post("/subscribe", async (req, res) => {
       return res.status(400).json({ error: "Faltan datos: subscription" });
     }
 
-    // Guardar o actualizar por endpoint (evita duplicados)
     const existing = await Subscription.findOne({ "subscription.endpoint": subscription.endpoint });
     if (existing) {
       existing.subscription = subscription;
@@ -177,25 +212,6 @@ app.post("/subscribe", async (req, res) => {
   }
 });
 
-// Función que envía la notificación y elimina subs inválidas
-async function sendNotificationDoc(subDoc, payload) {
-  try {
-    await webpush.sendNotification(subDoc.subscription, JSON.stringify(payload));
-    return { ok: true };
-  } catch (err) {
-    console.error("sendNotification error:", err && err.statusCode, err && err.body);
-    // 410 Gone o 404 Not Found -> eliminar suscripción obsoleta
-    if (err && (err.statusCode === 410 || err.statusCode === 404)) {
-      await Subscription.deleteOne({ _id: subDoc._id });
-      console.log("🧹 Suscripción removida (obsoleta):", subDoc._id.toString());
-      return { ok: false, removed: true };
-    }
-    return { ok: false, error: String(err) };
-  }
-}
-
-// Endpoint: enviar a todos los usuarios con un role específico
-// Body: { role, title, body, url, customData? }
 app.post("/notify/role", async (req, res) => {
   try {
     const { role, title, body, url, customData } = req.body;
@@ -218,8 +234,6 @@ app.post("/notify/role", async (req, res) => {
   }
 });
 
-// Endpoint: enviar a un usuario específico (puede haber varias suscripciones para 1 userId)
-// Body: { userId, title, body, url, customData? }
 app.post("/notify/user", async (req, res) => {
   try {
     const { userId, title, body, url, customData } = req.body;
@@ -242,8 +256,6 @@ app.post("/notify/user", async (req, res) => {
   }
 });
 
-
 // -------------------- INICIAR SERVIDOR --------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Servidor backend en puerto ${PORT}`));
-
